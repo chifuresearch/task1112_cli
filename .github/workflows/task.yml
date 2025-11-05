@@ -16,6 +16,8 @@ on:
 jobs:
   run-gemini-cli:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 允許讀寫
     steps:
       # 步驟 1: 將專案檔案 (例如 content.json) checkout 到執行環境
       - name: Checkout repository
