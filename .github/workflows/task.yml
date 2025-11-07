@@ -39,58 +39,75 @@ jobs:
           # ❗️❗️❗️ 重要：請確保您在 GitHub Secrets 中建立的 Secret 名稱是 GEMINICLI_KEY
           GEMINI_API_KEY: ${{ secrets.GEMINICLI_KEY }}
         run: |
-          # A. 取得台北時區的當前日期 (格式：YYYY-MM-DD)
-          # 為了和 commit message 格式一致
-          CURRENT_DATE=$(TZ="Asia/Taipei" date +'%Y-%m-%d')
-          echo "A. 取得日期: $CURRENT_DATE"
+          # A. 建立 .gemini/settings.json 檔案來設定 temperature
+          echo "A. 正在建立 .gemini/settings.json 檔案..."
+          mkdir -p .gemini
+          echo '{ "generation_config": { "temperature": 0.9 } }' > .gemini/settings.json
+          echo "A. 檔案建立完成。"
 
-          # B. 詢問 geminicli 指令取得名言
-          echo "B. 正在向 Gemini 請求名言佳句..."
-          # 強化 prompt，確保格式一致且使用繁體中文
-          POEM=$(gemini prompt --temperature 0.9  "請隨機給我一句不同以往的、勵志的名言佳句，並包含作者。請只回傳「詩句 - 作者」這個格式，不要有任何其他多餘的文字。請使用繁體中文。")
+          # B. 取得台北時區的當前日期
+          CURRENT_DATE=$(TZ="Asia/Taipei" date +'%Y-%m-%d')
+          echo "B. 取得日期: $CURRENT_DATE"
+
+          # ⬇️⬇️⬇️ 這裡是新增的核心邏輯 ⬇️⬇️⬇️
+          FILE_NAME="content.json"
+          HISTORY_CONTEXT="" # 先初始化一個空的「歷史上下文」變數
+
+          # C. 檢查 JSON 檔案並讀取歷史紀錄 (最新的 10 筆)
+          if [ -f "$FILE_NAME" ]; then
+            echo "C. 發現 $FILE_NAME，正在讀取最近 10 筆紀錄..."
+            
+            # 使用 jq 讀取：
+            # .[0:10]  -> 取得陣列中前 10 個 (因為我們是從前面插入，所以前 10 個就是最新的)
+            # .[] | .poem -> 展開陣列並只取出 "poem" 欄位的值
+            # -r         -> 輸出原始字串 (不要加上引號)
+            # sed 's/^/- /' -> 在每一行的開頭加上 "- "，變成一個列表
+            HISTORY_LIST=$(jq -r '.[0:10] | .[] | .poem' "$FILE_NAME" | sed 's/^/- /')
+            
+            # 如果 $HISTORY_LIST 不是空的，才組合上下文
+            if [ -n "$HISTORY_LIST" ]; then
+              HISTORY_CONTEXT="為了避免重複，這裡是我已經有的名言佳句，請不要給我這個列表中的任何一句：\n${HISTORY_LIST}\n\n"
+              echo "C. 已成功組合歷史紀錄上下文。"
+            fi
+          else
+            echo "C. $FILE_NAME 不存在，將建立新檔案。"
+            echo "[]" > "$FILE_NAME" # 如果檔案不存在，建立一個空的
+          fi
           
-          # 簡易的錯誤處理：如果 $POEM 是空的，就退出腳本
+          # D. 組合最終的 Prompt
+          BASE_PROMPT="請隨機給我一句不同以往的、勵志的名言佳句，並包含作者。請只回傳「名言 - 作者」這個格式，不要有任何其他多餘的文字。請使用繁體中文。"
+          
+          # 將「歷史上下文」和「基本提示詞」組合在一起
+          FINAL_PROMPT="${HISTORY_CONTEXT}${BASE_PROMPT}"
+          
+          # (除錯用) 印出最終的提示詞 (但金鑰會被 GitHub Actions 自動遮蔽)
+          # echo "--- 最終的 Prompt ---"
+          # echo "$FINAL_PROMPT"
+          # echo "---------------------"
+          
+          # E. 詢問 geminicli
+          echo "E. 正在向 Gemini 請求 (高創意/無重複) 名言佳句..."
+          # 使用 $FINAL_PROMPT 變數
+          POEM=$(gemini "$FINAL_PROMPT")
+          # ⬆️⬆️⬆️ 邏輯更新完畢 ⬆️⬆️⬆️
+
+          # F. 簡易的錯誤處理
           if [ -z "$POEM" ]; then
             echo "錯誤：Gemini 未回傳內容。可能是 API Key 問題或請求失敗。"
             exit 1
           fi
-          echo "B. 取得的內容: $POEM"
+          echo "E. 取得的內容: $POEM"
 
-          # C. 檢查是否有可讀寫的名言檔案，沒有的話就新建一個
-          FILE_NAME="content.json"
-          if [ ! -f "$FILE_NAME" ]; then
-            echo "C. 檔案 $FILE_NAME 不存在，建立新的 JSON 陣列檔案..."
-            # 建立一個空的 JSON 陣列
-            echo "[]" > "$FILE_NAME"
-          else
-            echo "C. 檔案 $FILE_NAME 已存在。"
-          fi
-
-          # D. 每次執行會把 取得的 資料 寫入到 content.json 中
-          # 使用 jq (GitHub Actions 內建) 來安全地處理 JSON，避免字串錯誤
-          echo "D. 正在將新資料寫入 $FILE_NAME..."
-          
-          # 1. 使用 jq 和 --arg 建立一個安全的 JSON 物件
-          # 這能妥善處理名言中的引號或特殊字元
+          # G. 每次執行會把 取得的 資料 寫入到 content.json 中
+          echo "G. G. 正在將新資料寫入 $FILE_NAME..."
           NEW_ENTRY=$(jq -n \
                         --arg date "$CURRENT_DATE" \
                         --arg poem "$POEM" \
                         '{date: $date, poem: $poem}')
-                        
-          # 2. 將新物件 "加到" 陣列的 "最前面" (最新的在最上面)
-          #
-          #   jq '. = [$new_entry] + .' "$FILE_NAME"
-          #
-          #   .              = 讀取 content.json 的整個內容 (陣列)
-          #   [$new_entry]   = 把我們的新物件包成一個單一元素的陣列
-          #   + .            = 把它跟 '原有的陣列' (content.json) 串在一起
-          #
-          #   > tmp.json && mv tmp.json "$FILE_NAME"
-          #   這是為了安全地覆寫檔案，避免中斷時檔案損毀
           
           jq --argjson new_entry "$NEW_ENTRY" '. = [$new_entry] + .' "$FILE_NAME" > tmp.json && mv tmp.json "$FILE_NAME"
 
-          echo "D. 寫入完成。"
+          echo "G. 寫入完成。"
           echo "--- 檔案目前內容 (前 5 筆) ---"
           jq '. | .[0:5]' "$FILE_NAME"
           echo "-----------------------------"
